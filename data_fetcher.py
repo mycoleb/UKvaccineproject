@@ -19,6 +19,7 @@ class UKCovidDataFetcher:
     
     def __init__(self):
         self.sources = {
+            'our_world_data': 'https://covid.ourworldindata.org/data/owid-covid-data.csv',
             'who': 'https://covid19.who.int/api/data',
             'jhu': 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_{metric}_global.csv',
             'open_disease': 'https://disease.sh/v3/covid-19/countries/UK?strict=true'
@@ -164,9 +165,10 @@ class UKCovidDataFetcher:
         return None, None
     
     def get_case_data(self, days=180):
+        
         """Get case data from the best available source"""
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
+        # MAJOR CHANGE: Instead of filtering to current dates, use the actual data date range
+        # This ensures we display the available historical data rather than requiring current data
         
         attempts = [
             ('jhu_confirmed', lambda: self._fetch_jhu_data('confirmed')),
@@ -187,27 +189,72 @@ class UKCovidDataFetcher:
         if source.startswith('jhu'):
             # JHU provides cumulative data - convert to daily
             data['new_cases'] = data['count'].diff().fillna(0)
-            data = data[(data['date'] >= start_date) & (data['date'] <= end_date)]
+            
+            # Convert any string dates to datetime if necessary
+            if not pd.api.types.is_datetime64_any_dtype(data['date']):
+                data['date'] = pd.to_datetime(data['date'])
+            
+            # Instead of filtering to current date range, use the actual data date range
+            # Sort to get last N days of data
+            data = data.sort_values('date', ascending=False).head(days).sort_values('date')
+            
+            # Log the actual date range for debugging
+            if not data.empty:
+                logger.info(f"JHU case data date range: {data['date'].min()} to {data['date'].max()}")
+            else:
+                logger.warning("JHU case data is empty")
+                
             return data[['date', 'count', 'new_cases']].rename(columns={
                 'count': 'cumCasesByPublishDate',
                 'new_cases': 'newCasesByPublishDate'
             })
         elif source == 'open_disease':
-            # Open Disease provides current snapshot - create time series with PROPER CURRENT DATES
+            # Open Disease provides current snapshot - create time series
+            # Generate synthetic dates using the actual date range from JHU data if available
+            jhu_data = self._fetch_jhu_data('confirmed')
+            if jhu_data is not None and not jhu_data.empty:
+                # Use JHU date range for synthetic data
+                if not pd.api.types.is_datetime64_any_dtype(jhu_data['date']):
+                    jhu_data['date'] = pd.to_datetime(jhu_data['date'])
+                
+                jhu_data = jhu_data.sort_values('date', ascending=False).head(days)
+                start_date = jhu_data['date'].min()
+                end_date = jhu_data['date'].max()
+            else:
+                # If JHU data is not available, create synthetic dates
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days)
+            
             dates = pd.date_range(start=start_date, end=end_date, periods=days)
-            logger.info(f"Open Disease synthetic date range: {dates.min()} to {dates.max()}")
+            logger.info(f"Synthetic date range: {dates.min()} to {dates.max()}")
+            
+            # Create a synthetic time series
             cases = np.linspace(data['cases']/2, data['cases'], days)
-            return pd.DataFrame({
+            result_df = pd.DataFrame({
                 'date': dates,
                 'cumCasesByPublishDate': cases.astype(int),
                 'newCasesByPublishDate': np.diff(cases, prepend=0).astype(int)
             })
+            
+            # Ensure date is proper datetime
+            result_df['date'] = pd.to_datetime(result_df['date'])
+            logger.info(f"Open Disease case data date range: {result_df['date'].min()} to {result_df['date'].max()}")
+            
+            return result_df
         elif source == 'who':
             # WHO provides detailed time series
             who_cases = pd.DataFrame(data['cases'])
             who_cases['date'] = pd.to_datetime(who_cases['date_reported'])
-            who_cases = who_cases[(who_cases['date'] >= start_date) & 
-                                (who_cases['date'] <= end_date)]
+            
+            # Sort to get last N days of data instead of filtering by current date
+            who_cases = who_cases.sort_values('date', ascending=False).head(days).sort_values('date')
+                                
+            # Log the actual date range
+            if not who_cases.empty:
+                logger.info(f"WHO case data date range: {who_cases['date'].min()} to {who_cases['date'].max()}")
+            else:
+                logger.warning("WHO case data is empty")
+                
             return who_cases[['date', 'cumulative_cases', 'new_cases']].rename(columns={
                 'cumulative_cases': 'cumCasesByPublishDate',
                 'new_cases': 'newCasesByPublishDate'
@@ -229,37 +276,79 @@ class UKCovidDataFetcher:
             
         logger.info(f"Using death data from {source}")
         
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days)
-        
         if source == 'jhu_deaths':
             # JHU provides cumulative deaths - convert to daily
             data['new_deaths'] = data['count'].diff().fillna(0)
-            data = data[(data['date'] >= start_date) & (data['date'] <= end_date)]
+            
+            # Make sure the data is within the requested date range
+            # Convert any string dates to datetime if necessary
+            if not pd.api.types.is_datetime64_any_dtype(data['date']):
+                data['date'] = pd.to_datetime(data['date'])
+            
+            # Sort to get last N days of data instead of filtering to current dates
+            data = data.sort_values('date', ascending=False).head(days).sort_values('date')
+            
+            # Log the actual date range for debugging
+            if not data.empty:
+                logger.info(f"JHU death data date range: {data['date'].min()} to {data['date'].max()}")
+            else:
+                logger.warning("JHU death data is empty")
+                
             return data[['date', 'count', 'new_deaths']].rename(columns={
                 'count': 'cumDeaths28DaysByPublishDate',
                 'new_deaths': 'newDeaths28DaysByPublishDate'
             })
         elif source == 'open_disease':
-            # Create time series from snapshot with PROPER CURRENT DATES
+            # Create synthetic time series based on JHU date range if available
+            jhu_data = self._fetch_jhu_data('deaths')
+            if jhu_data is not None and not jhu_data.empty:
+                # Use JHU date range for synthetic data
+                if not pd.api.types.is_datetime64_any_dtype(jhu_data['date']):
+                    jhu_data['date'] = pd.to_datetime(jhu_data['date'])
+                
+                jhu_data = jhu_data.sort_values('date', ascending=False).head(days)
+                start_date = jhu_data['date'].min()
+                end_date = jhu_data['date'].max()
+            else:
+                # If JHU data is not available, create synthetic dates
+                end_date = datetime.now()
+                start_date = end_date - timedelta(days=days)
+            
             dates = pd.date_range(start=start_date, end=end_date, periods=days)
             logger.info(f"Open Disease death synthetic date range: {dates.min()} to {dates.max()}")
+            
+            # Create a synthetic time series
             deaths = np.linspace(data['deaths']/2, data['deaths'], days)
-            return pd.DataFrame({
+            result_df = pd.DataFrame({
                 'date': dates,
                 'cumDeaths28DaysByPublishDate': deaths.astype(int),
                 'newDeaths28DaysByPublishDate': np.diff(deaths, prepend=0).astype(int)
             })
+            
+            # Ensure date is proper datetime
+            result_df['date'] = pd.to_datetime(result_df['date'])
+            logger.info(f"Open Disease death data date range: {result_df['date'].min()} to {result_df['date'].max()}")
+            
+            return result_df
         elif source == 'who':
+            # WHO provides detailed time series
             who_deaths = pd.DataFrame(data['deaths'])
             who_deaths['date'] = pd.to_datetime(who_deaths['date_reported'])
-            who_deaths = who_deaths[(who_deaths['date'] >= start_date) & 
-                                (who_deaths['date'] <= end_date)]
+            
+            # Sort to get last N days of data instead of filtering to current dates
+            who_deaths = who_deaths.sort_values('date', ascending=False).head(days).sort_values('date')
+                                
+            # Log the actual date range
+            if not who_deaths.empty:
+                logger.info(f"WHO death data date range: {who_deaths['date'].min()} to {who_deaths['date'].max()}")
+            else:
+                logger.warning("WHO death data is empty")
+                
             return who_deaths[['date', 'cumulative_deaths', 'new_deaths']].rename(columns={
                 'cumulative_deaths': 'cumDeaths28DaysByPublishDate',
                 'new_deaths': 'newDeaths28DaysByPublishDate'
             })
-    
+        
     def get_vaccination_data(self, days=180):
         """Get vaccination data from available sources"""
         # Try Open Disease API first

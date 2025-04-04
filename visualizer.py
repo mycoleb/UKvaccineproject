@@ -2,7 +2,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import logging
-from matplotlib.dates import DateFormatter
+import numpy as np
+from matplotlib.dates import DateFormatter, MonthLocator, YearLocator
+import matplotlib.dates as mdates
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,6 +15,11 @@ class UKCovidVisualizer:
     Visualizes UK COVID-19 vaccination and case data.
     Includes error handling for data validation.
     """
+    def _validate_dates(self, df):
+        if df['date'].max() < pd.Timestamp('2023-01-01'):
+            logger.warning("Data appears to be outdated")
+            return False
+        return True
     
     def __init__(self):
         # Set seaborn style
@@ -36,7 +43,31 @@ class UKCovidVisualizer:
             logger.error(f"Missing required columns: {missing_cols}")
             return False
             
+        # Check for date column and format
+        if 'date' in df.columns:
+            if not pd.api.types.is_datetime64_any_dtype(df['date']):
+                logger.warning("Date column is not in datetime format, converting...")
+                try:
+                    df['date'] = pd.to_datetime(df['date'])
+                except Exception as e:
+                    logger.error(f"Failed to convert dates: {str(e)}")
+                    return False
+            
+            # Log date range for debugging
+            logger.info(f"Visualization date range: {df['date'].min()} to {df['date'].max()}")
+            
         return True
+    
+    def _setup_date_axis(self, ax):
+        """
+        Configure date formatting for the x-axis
+        """
+        # Format the date axis properly
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=2))
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        return ax
     
     def plot_vaccination_trends(self, vaccine_df):
         """
@@ -56,7 +87,7 @@ class UKCovidVisualizer:
             plt.figure(figsize=(14, 8))
             
             # Plot daily vaccinations
-            plt.subplot(2, 1, 1)
+            ax1 = plt.subplot(2, 1, 1)
             plt.plot(vaccine_df['date'], vaccine_df['newPeopleVaccinatedFirstDoseByPublishDate'], 
                     label='First Dose', color='blue')
             plt.plot(vaccine_df['date'], vaccine_df['newPeopleVaccinatedSecondDoseByPublishDate'], 
@@ -67,11 +98,10 @@ class UKCovidVisualizer:
             plt.title('Daily COVID-19 Vaccinations in the UK')
             plt.ylabel('Number of People')
             plt.legend()
-            plt.gca().xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
-            plt.xticks(rotation=45)
+            self._setup_date_axis(ax1)
             
             # Plot cumulative vaccinations
-            plt.subplot(2, 1, 2)
+            ax2 = plt.subplot(2, 1, 2)
             plt.plot(vaccine_df['date'], vaccine_df['cumPeopleVaccinatedFirstDoseByPublishDate'], 
                     label='Cumulative First Dose', color='blue')
             plt.plot(vaccine_df['date'], vaccine_df['cumPeopleVaccinatedSecondDoseByPublishDate'], 
@@ -81,55 +111,55 @@ class UKCovidVisualizer:
             plt.ylabel('Number of People')
             plt.xlabel('Date')
             plt.legend()
-            plt.gca().xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
-            plt.xticks(rotation=45)
+            self._setup_date_axis(ax2)
             
             plt.tight_layout()
             return plt
             
         except Exception as e:
             logger.error(f"Error plotting vaccination trends: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     def plot_case_trends(self, case_df):
         """
         Plots COVID-19 case and death trends over time.
         """
+        
         try:
-            required_columns = [
-                'date',
-                'newCasesByPublishDate',
-                'newDeaths28DaysByPublishDate'
-            ]
-            
+            required_columns = ['date', 'newCasesByPublishDate']
             if not self._validate_data(case_df, required_columns):
                 return None
-                
-            plt.figure(figsize=(14, 8))
             
-            # Plot daily cases and deaths
-            plt.subplot(2, 1, 1)
+            # Create simplified plot if death data is missing
+            plt.figure(figsize=(12, 6))
             plt.bar(case_df['date'], case_df['newCasesByPublishDate'], 
-                   label='New Cases', color='orange', alpha=0.7)
+                color='orange', alpha=0.7)
+            plt.title('Daily COVID-19 Cases in the UK')
+                # Plot daily cases and deaths
+            ax1 = plt.subplot(2, 1, 1)
+                
+            #label=('New Cases', color='orange', alpha=0.7)
             plt.title('Daily COVID-19 Cases in the UK')
             plt.ylabel('Number of Cases')
-            plt.gca().xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
-            plt.xticks(rotation=45)
+            self._setup_date_axis(ax1)
             
-            plt.subplot(2, 1, 2)
+            ax2 = plt.subplot(2, 1, 2)
             plt.bar(case_df['date'], case_df['newDeaths28DaysByPublishDate'], 
                    label='New Deaths', color='red', alpha=0.7)
             plt.title('Daily COVID-19 Deaths in the UK (within 28 days of positive test)')
             plt.ylabel('Number of Deaths')
             plt.xlabel('Date')
-            plt.gca().xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
-            plt.xticks(rotation=45)
+            self._setup_date_axis(ax2)
             
             plt.tight_layout()
             return plt
             
         except Exception as e:
             logger.error(f"Error plotting case trends: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     def plot_vaccination_vs_cases(self, vaccine_df, case_df):
@@ -143,6 +173,9 @@ class UKCovidVisualizer:
                 
             # Merge the two dataframes on date
             merged_df = pd.merge(vaccine_df, case_df, on='date', how='inner')
+            
+            # Log the dates for debugging
+            logger.info(f"Merged data date range: {merged_df['date'].min()} to {merged_df['date'].max()}")
             
             required_columns = [
                 'date',
@@ -172,18 +205,19 @@ class UKCovidVisualizer:
             ax2.tick_params(axis='y', labelcolor=color)
             
             plt.title('UK Vaccination Progress vs COVID-19 Cases')
-            fig.tight_layout()
             
             # Combine legends
             lines1, labels1 = ax1.get_legend_handles_labels()
             lines2, labels2 = ax2.get_legend_handles_labels()
             ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
             
-            plt.gca().xaxis.set_major_formatter(DateFormatter("%Y-%m-%d"))
-            plt.xticks(rotation=45)
+            # Format date axis
+            self._setup_date_axis(ax1)
             
             return plt
             
         except Exception as e:
             logger.error(f"Error plotting vaccination vs cases: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
